@@ -28,6 +28,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
   const [orderStatus, setOrderStatus] = useState<string | null>(null)
   const [splitShare, setSplitShare] = useState<number | null>(null)
   const [splitNumPeopleStored, setSplitNumPeopleStored] = useState<number | null>(null)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
   // fetch open order for this table from backend
   const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
@@ -57,6 +58,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
         setSplitShare(null)
         setSplitNumPeopleStored(null)
         setOrderStatus(null)
+        setLastUpdated(new Date())
         return null
       }
 
@@ -89,6 +91,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
       setSplitNumPeopleStored(splitInfo.split_num_people || null)
 
       if (order.status === 'paid' || rem <= 0) setPaid(true)
+      setLastUpdated(new Date())
       return order
     } catch (e) {
       // fallback defaults
@@ -137,6 +140,28 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
 
   useEffect(() => {
     if (resolvedParams?.tableId) fetchOrder()
+  }, [resolvedParams?.tableId])
+
+  // Poll for updates every 5 seconds to keep the bill info fresh
+  useEffect(() => {
+    if (!resolvedParams?.tableId) return
+    let mounted = true
+    const interval = setInterval(() => {
+      if (!mounted) return
+      fetchOrder().catch(() => {})
+    }, 5000)
+
+    // when the tab becomes visible, fetch immediately
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') fetchOrder().catch(() => {})
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => {
+      mounted = false
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
   }, [resolvedParams?.tableId])
 
   const getTaxAmount = (amount: number) => amount * 0.1
