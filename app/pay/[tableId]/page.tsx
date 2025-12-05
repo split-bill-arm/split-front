@@ -171,12 +171,13 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
     }
   }, [resolvedParams?.tableId])
 
-  const getTaxAmount = (amount: number) => amount * 0.1
+  // Tax removed: no tax calculation or addition to amounts
+  const getTaxAmount = (_amount: number) => 0
   const getAmountPerPerson = () => {
     if (paymentMethod === "split") {
       // Prefer backend-provided split share if available (computed from immutable bill_amount)
       const shareBase = splitShare !== null ? Number(splitShare) : (Number(billTotal || 0) / Math.max(1, numberOfPeople))
-      return shareBase + getTaxAmount(shareBase)
+      return shareBase
     }
     if (paymentMethod === "own") {
       // compute from selected items
@@ -185,9 +186,9 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
         const it = items.find((x) => x.id === orderItemId)
         if (it) subtotal += Number(it.price || 0) * qty
       })
-      return subtotal + getTaxAmount(subtotal)
+      return subtotal
     }
-    return Number(billTotal || 0) + getTaxAmount(Number(billTotal || 0))
+    return Number(billTotal || 0)
   }
 
   const disableOther = (option: string) => paymentMethod !== null && paymentMethod !== option
@@ -543,10 +544,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
                   <span className="text-slate-600">{t.subtotal}</span>
                   <span className="font-semibold">${Number(billTotal || 0).toFixed(2)}</span>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-slate-600">{t.tax}</span>
-                  <span className="font-semibold">${Number(getTaxAmount(Number(billTotal || 0))).toFixed(2)}</span>
-                </div>
+                {/* Tax removed from bill summary */}
                 <div className="flex justify-between text-sm">
                   <span className="text-slate-600">Paid</span>
                   <span className="font-semibold">${Number(paidTotal || 0).toFixed(2)}</span>
