@@ -29,6 +29,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
   const [splitShare, setSplitShare] = useState<number | null>(null)
   const [splitNumPeopleStored, setSplitNumPeopleStored] = useState<number | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [methodLocked, setMethodLocked] = useState<null | "full" | "split" | "own">(null)
 
   // fetch open order for this table from backend
   const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
@@ -90,6 +91,10 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
       setSplitShare(splitInfo.split_share_amount ? Number(splitInfo.split_share_amount) : null)
       setSplitNumPeopleStored(splitInfo.split_num_people || null)
 
+      // If a split has been initialized on the backend by someone else,
+      // lock the payment method to 'split' locally so other options are disabled.
+      setMethodLocked((prev) => (prev === null && splitInfo.split_num_people ? 'split' : prev))
+
       if (order.status === 'paid' || rem <= 0) setPaid(true)
       setLastUpdated(new Date())
       return order
@@ -135,6 +140,8 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
     const splitInfo = order.payment_summary || {}
     setSplitShare(splitInfo.split_share_amount ? Number(splitInfo.split_share_amount) : null)
     setSplitNumPeopleStored(splitInfo.split_num_people || null)
+    // If backend indicates a split is active, lock locally so other options stay disabled
+    setMethodLocked((prev) => (prev === null && splitInfo.split_num_people ? 'split' : prev))
     if (order.status === 'paid' || rem <= 0) setPaid(true)
   }
 
@@ -187,6 +194,10 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
 
   const handleSelectSplit = () => {
     // Open split UI and initialize split on backend with current `numberOfPeople`
+    // If another method is already chosen and it's not split, don't allow switching
+    if (methodLocked && methodLocked !== 'split') return
+    // lock immediately to avoid races where user clicks another option quickly
+    setMethodLocked('split')
     setPaymentMethod('split')
     // initialize split on backend for this order with currently selected number
     ;(async () => {
@@ -279,9 +290,11 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
             toast({ title: 'Payment successful', description: 'Thank you for your payment' })
             if (json && json.order) {
               applyOrderToState(json.order)
+              setMethodLocked(null)
             } else {
               // fallback to full refetch
               await fetchOrder()
+              setMethodLocked(null)
             }
       } else {
         const err = await res.json().catch(() => null)
@@ -307,8 +320,10 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
             toast({ title: 'Share paid', description: 'Your split share was recorded' })
             if (json && json.order) {
               applyOrderToState(json.order)
+              setMethodLocked(null)
             } else {
               await fetchOrder()
+              setMethodLocked(null)
             }
       } else {
         const err = await res.json().catch(() => null)
@@ -338,8 +353,10 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
             toast({ title: 'Payment successful', description: 'Items have been paid' })
             if (json && json.order) {
               applyOrderToState(json.order)
+              setMethodLocked(null)
             } else {
               await fetchOrder()
+              setMethodLocked(null)
             }
       } else {
         const err = await res.json().catch(() => null)
@@ -423,32 +440,44 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
               <div className="bg-slate-100 p-4 rounded mb-6">
                 <p className="text-sm text-slate-600">{t.bill}</p>
                 <p className="text-3xl font-bold text-slate-900">${(billTotal || 0).toFixed(2)}</p>
+                <div className="flex items-center justify-between mt-2 text-sm">
+                  <span className="text-slate-600">Remaining</span>
+                  <span className="font-semibold">${Number(remaining || 0).toFixed(2)}</span>
+                </div>
               </div>
 
               <p className="font-semibold text-slate-900 mb-3">{t.selectPayment}</p>
 
               <Button
-                onClick={() => setPaymentMethod("full")}
+                onClick={() => { if (methodLocked && methodLocked !== 'full') return; setMethodLocked('full'); setPaymentMethod("full") }}
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white py-6 text-base"
-                disabled={orderStatus === 'paid' || !orderId || paymentLoading}
+                disabled={
+                  orderStatus === 'paid' || !orderId || paymentLoading ||
+                  (methodLocked !== null && methodLocked !== 'full') ||
+                  (splitNumPeopleStored !== null && paymentMethod !== 'split')
+                }
               >
                 {t.payFull}
               </Button>
 
               <Button
-                onClick={handleSelectSplit}
+                onClick={() => { if (methodLocked && methodLocked !== 'split') return; setMethodLocked('split'); handleSelectSplit() }}
                 variant="outline"
                 className="w-full py-6 text-base border-2"
-                disabled={orderStatus === 'paid' || !orderId || paymentLoading}
+                disabled={orderStatus === 'paid' || !orderId || paymentLoading || (methodLocked !== null && methodLocked !== 'split')}
               >
                 {t.splitBill}
               </Button>
 
               <Button
-                onClick={() => setPaymentMethod("own")}
+                onClick={() => { if (methodLocked && methodLocked !== 'own') return; setMethodLocked('own'); setPaymentMethod("own") }}
                 variant="outline"
                 className="w-full py-6 text-base border-2"
-                disabled={orderStatus === 'paid' || !orderId || paymentLoading}
+                disabled={
+                  orderStatus === 'paid' || !orderId || paymentLoading ||
+                  (methodLocked !== null && methodLocked !== 'own') ||
+                  (splitNumPeopleStored !== null && paymentMethod !== 'split')
+                }
               >
                 {t.payOwnItems}
               </Button>
@@ -535,10 +564,19 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
               {paymentMethod === 'own' ? (
                 <>
                   <div className="space-y-2">
-                    {items.length === 0 ? (
-                      <div className="text-slate-600">No items to pay for.</div>
-                    ) : (
-                      items.map((item) => {
+                    {(() => {
+                      // Filter out items that have zero unpaid amount so they aren't shown
+                      const payableItems = items.filter((item) => {
+                        const unpaidQty = Number(item.unpaid_quantity || 0)
+                        const price = Number(item.price || 0)
+                        return unpaidQty > 0 && price * unpaidQty > 0
+                      })
+
+                      if (payableItems.length === 0) {
+                        return <div className="text-slate-600">No items to pay for.</div>
+                      }
+
+                      return payableItems.map((item) => {
                         const selectedQty = selectedItemMap.get(item.id) || 0
                         return (
                           <div key={item.id} className="flex items-center justify-between">
@@ -566,7 +604,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
                           </div>
                         )
                       })
-                    )}
+                    })()}
                   </div>
 
                   <Button onClick={handlePayItems} className="w-full bg-green-600 hover:bg-green-700 text-white py-6 text-base" disabled={paymentLoading}>
@@ -599,7 +637,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
                 </Button>
               )}
 
-              <Button onClick={() => setPaymentMethod(null)} variant="outline" className="w-full">
+              <Button onClick={() => { setPaymentMethod(null); setMethodLocked(null) }} variant="outline" className="w-full">
                 {t.cancel}
               </Button>
             </div>
