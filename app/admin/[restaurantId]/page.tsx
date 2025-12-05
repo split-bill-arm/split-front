@@ -8,6 +8,7 @@ import { translations, type Language } from "@/lib/translations"
 import TableOrderInput from "@/components/admin/table-order-input"
 import OpenOrdersView from "@/components/admin/open-orders-view"
 import type { TableBill } from "@/lib/types"
+import { API_BASE } from '@/lib/api'
 
 export default function AdminPanel({ params }: { params: Promise<{ restaurantId: string }> | { restaurantId: string } }) {
   const [language, setLanguage] = useState<Language>("en")
@@ -34,7 +35,7 @@ export default function AdminPanel({ params }: { params: Promise<{ restaurantId:
     )
   }
 
-  const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
+  const API = API_BASE
 
   const fetchOrders = async () => {
     try {
@@ -82,7 +83,7 @@ export default function AdminPanel({ params }: { params: Promise<{ restaurantId:
 
   useEffect(() => {
     // fetch tables and pick the first one only
-    const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
+    const API = API_BASE
     fetch(`${API}/tables/`)
       .then((r) => r.json())
       .then((data) => {

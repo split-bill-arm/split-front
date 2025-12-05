@@ -1,6 +1,7 @@
 "use client"
 
 import React, { useState, useEffect } from "react"
+import { API_BASE } from '@/lib/api'
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { translations, type Language } from "@/lib/translations"
@@ -31,8 +32,8 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [methodLocked, setMethodLocked] = useState<null | "full" | "split" | "own">(null)
 
-  // fetch open order for this table from backend
-  const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
+  // fetch open order for this table from backend (centralized)
+  const API = API_BASE
 
   const fetchOrder = async () => {
     const tableId = Number(resolvedParams?.tableId)
@@ -78,7 +79,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
       })
 
       setItems(mapped)
-      const total = Number(order.bill_amount ?? mapped.reduce((s, it) => s + it.price * it.quantity, 0))
+      const total = Number(order.bill_amount ?? mapped.reduce((s: number, it: any) => s + (Number(it.price || 0) * Number(it.quantity || 0)), 0))
       setBillTotal(total)
       setOrderId(order.id)
       setSelectedItemMap(new Map())
@@ -93,7 +94,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
 
       // If a split has been initialized on the backend by someone else,
       // lock the payment method to 'split' locally so other options are disabled.
-      setMethodLocked((prev) => (prev === null && splitInfo.split_num_people ? 'split' : prev))
+      setMethodLocked((prev) => (prev === null && splitInfo.split_num_people != null ? 'split' : prev))
 
       if (order.status === 'paid' || rem <= 0) setPaid(true)
       setLastUpdated(new Date())
@@ -128,7 +129,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
     })
 
     setItems(mapped)
-    const total = Number(order.bill_amount ?? mapped.reduce((s, it) => s + it.price * it.quantity, 0))
+    const total = Number(order.bill_amount ?? mapped.reduce((s: number, it: any) => s + (Number(it.price || 0) * Number(it.quantity || 0)), 0))
     setBillTotal(total)
     setOrderId(order.id)
     setSelectedItemMap(new Map())
@@ -141,7 +142,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
     setSplitShare(splitInfo.split_share_amount ? Number(splitInfo.split_share_amount) : null)
     setSplitNumPeopleStored(splitInfo.split_num_people || null)
     // If backend indicates a split is active, lock locally so other options stay disabled
-    setMethodLocked((prev) => (prev === null && splitInfo.split_num_people ? 'split' : prev))
+    setMethodLocked((prev) => (prev === null && splitInfo.split_num_people != null ? 'split' : prev))
     if (order.status === 'paid' || rem <= 0) setPaid(true)
   }
 
@@ -172,7 +173,6 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
   }, [resolvedParams?.tableId])
 
   // Tax removed: no tax calculation or addition to amounts
-  const getTaxAmount = (_amount: number) => 0
   const getAmountPerPerson = () => {
     if (paymentMethod === "split") {
       // Prefer backend-provided split share if available (computed from immutable bill_amount)

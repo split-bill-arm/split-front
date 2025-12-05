@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { mockMenu } from "@/lib/mock-data"
 import { useEffect } from "react"
 import { translations, type Language } from "@/lib/translations"
+import { API_BASE } from '@/lib/api'
 
 interface MenuItem {
   id: number
@@ -31,7 +32,7 @@ export default function TableOrderInput({ tableId, onAddOrder, onClose, language
 
   useEffect(() => {
     // Fetch menu items from backend; fallback to mockMenu on error
-    fetch(process.env.NEXT_PUBLIC_API_URL ? `${process.env.NEXT_PUBLIC_API_URL}/menu-items/` : `http://localhost:8000/api/menu-items/`)
+    fetch(`${API_BASE}/menu-items/`)
       .then((r) => r.json())
       .then((data) => {
         const list = Array.isArray(data) ? data : data && data.results ? data.results : null
@@ -94,7 +95,7 @@ export default function TableOrderInput({ tableId, onAddOrder, onClose, language
       items: items.map((i) => ({ menu_item: i.menuId, quantity: i.quantity })),
     }
 
-    fetch(process.env.NEXT_PUBLIC_API_URL ? `${process.env.NEXT_PUBLIC_API_URL}/orders/create-for-table/` : `http://localhost:8000/api/orders/create-for-table/`, {
+    fetch(`${API_BASE}/orders/create-for-table/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
