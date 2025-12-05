@@ -4,12 +4,16 @@ import React, { useState, useEffect } from "react"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { translations, type Language } from "@/lib/translations"
+import { useToast } from '@/hooks/use-toast'
+import { Spinner } from '@/components/ui/spinner'
 
 export default function CustomerPayment({ params }: { params: Promise<{ tableId: string }> | { tableId: string } }) {
   const [language, setLanguage] = useState<Language>("en")
   const [paymentMethod, setPaymentMethod] = useState<"full" | "split" | "own" | null>(null)
   const [numberOfPeople, setNumberOfPeople] = useState(1)
   const [paid, setPaid] = useState(false)
+  const { toast } = useToast()
+  const [paymentLoading, setPaymentLoading] = useState(false)
 
   const t = translations[language]
 
@@ -37,10 +41,11 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
       const menuList = Array.isArray(menuData) ? menuData : menuData.results || []
       const allOrders = Array.isArray(ordersData) ? ordersData : ordersData.results || []
 
-      // pick latest order for this table (open or paid)
+      // prefer an open order for this table; fall back to latest if none open
       const tableOrders = allOrders.filter((o: any) => o.table === tableId)
+      const openOrder = tableOrders.find((o: any) => o.status === 'open')
       tableOrders.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-      const order = tableOrders.length > 0 ? tableOrders[0] : null
+      const order = openOrder || (tableOrders.length > 0 ? tableOrders[0] : null)
 
       if (!order) {
         setItems([])
@@ -55,13 +60,17 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
         return null
       }
 
+      // map items using backend-provided fields (including unpaid_quantity and menu_item_name)
       const mapped = (order.items || []).map((it: any) => {
-        const menuItem = menuList.find((m: any) => m.id === (it.menu_item || it.menuId || null))
+        const menuName = it.menu_item_name || (menuList.find((m: any) => m.id === (it.menu_item || it.menuId || null)) || {}).name || String(it.menu_item || it.menuId || 'Item')
         return {
           id: it.id,
-          name: menuItem ? menuItem.name : String(it.menu_item || it.menuId || 'Item'),
+          name: menuName,
           quantity: it.quantity || 1,
           price: Number(it.price || 0),
+          paid_quantity: Number(it.paid_quantity || 0),
+          unpaid_quantity: Number(it.unpaid_quantity ?? Math.max(0, (it.quantity || 1) - (it.paid_quantity || 0))),
+          unpaid_amount: Number(it.unpaid_amount || 0),
         }
       })
 
@@ -95,6 +104,37 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
     }
   }
 
+  // apply order object returned by backend directly to local state for immediate UI updates
+  const applyOrderToState = (order: any) => {
+    const mapped = (order.items || []).map((it: any) => {
+      const menuName = it.menu_item_name || ''
+      return {
+        id: it.id,
+        name: menuName,
+        quantity: it.quantity || 1,
+        price: Number(it.price || 0),
+        paid_quantity: Number(it.paid_quantity || 0),
+        unpaid_quantity: Number(it.unpaid_quantity ?? Math.max(0, (it.quantity || 1) - (it.paid_quantity || 0))),
+        unpaid_amount: Number(it.unpaid_amount || 0),
+      }
+    })
+
+    setItems(mapped)
+    const total = Number(order.bill_amount ?? mapped.reduce((s, it) => s + it.price * it.quantity, 0))
+    setBillTotal(total)
+    setOrderId(order.id)
+    setSelectedItemMap(new Map())
+    const paid = Number(order.paid_total || 0)
+    const rem = Number(order.remaining_amount ?? order.remaining ?? (total - paid))
+    setPaidTotal(paid)
+    setRemaining(rem)
+    setOrderStatus(order.status)
+    const splitInfo = order.payment_summary || {}
+    setSplitShare(splitInfo.split_share_amount ? Number(splitInfo.split_share_amount) : null)
+    setSplitNumPeopleStored(splitInfo.split_num_people || null)
+    if (order.status === 'paid' || rem <= 0) setPaid(true)
+  }
+
   useEffect(() => {
     if (resolvedParams?.tableId) fetchOrder()
   }, [resolvedParams?.tableId])
@@ -121,29 +161,70 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
   const disableOther = (option: string) => paymentMethod !== null && paymentMethod !== option
 
   const handleSelectSplit = () => {
+    // Open split UI and initialize split on backend with current `numberOfPeople`
     setPaymentMethod('split')
-    setNumberOfPeople(2)
-    // initialize split on backend for this order
+    // initialize split on backend for this order with currently selected number
     ;(async () => {
       if (!orderId) return
       try {
-        await fetch(`${API}/orders/${orderId}/split/`, {
+        const res = await fetch(`${API}/orders/${orderId}/split/`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ people: 2, init: true }),
+          body: JSON.stringify({ people: numberOfPeople || 2, init: true }),
         })
-        await fetchOrder()
+        if (res.ok) {
+          const json = await res.json()
+          // refresh order and stored split info
+          await fetchOrder()
+          toast({ title: 'Split initialized', description: `Split for ${numberOfPeople || 2} people` })
+        } else {
+          const err = await res.json().catch(() => null)
+          toast({ title: 'Split init failed', description: err?.detail || 'Could not initialize split' })
+        }
       } catch (e) {
-        // ignore
+        // ignore network errors but notify
+        toast({ title: 'Network error', description: 'Could not initialize split' })
       }
     })()
   }
+
+  // When in split mode, if user changes the number of people, re-initialize the split on the backend
+  const prevSplitPeopleRef = React.useRef<number | null>(null)
+  useEffect(() => {
+    if (paymentMethod !== 'split' || !orderId) return
+    const prev = prevSplitPeopleRef.current
+    if (prev === numberOfPeople) return
+    // avoid calling on first mount where prev is null but split may already be initialized
+    prevSplitPeopleRef.current = numberOfPeople
+
+    ;(async () => {
+      try {
+        // If backend already stored a different split_num_people, the endpoint will return an error
+        const res = await fetch(`${API}/orders/${orderId}/split/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ people: numberOfPeople, init: true }),
+        })
+        if (res.ok) {
+          await fetchOrder()
+          toast({ title: 'Split updated', description: `Split set to ${numberOfPeople} people` })
+        } else {
+          const err = await res.json().catch(() => null)
+          toast({ title: 'Split update failed', description: err?.detail || 'Could not change split' })
+        }
+      } catch (e) {
+        toast({ title: 'Network error', description: 'Could not update split' })
+      }
+    })()
+  }, [numberOfPeople, paymentMethod, orderId])
 
   const toggleSelectItem = (orderItemId: number) => {
     setSelectedItemMap((prev) => {
       const m = new Map(prev)
       const current = m.get(orderItemId) || 0
-      if (current >= items.find((it) => it.id === orderItemId)?.quantity) return m
+      const it = items.find((it) => it.id === orderItemId)
+      const max = it ? Number(it.unpaid_quantity || 0) : 0
+      if (current >= max) return m
       m.set(orderItemId, (m.get(orderItemId) || 0) + 1)
       return m
     })
@@ -161,28 +242,55 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
 
   const handlePayFull = async () => {
     if (!orderId) return
-    const res = await fetch(`${API}/payments/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ order: orderId, method: 'full' }),
-    })
-    if (res.ok) {
-      const order = await fetchOrder()
-      if (order && (Number(order.remaining || 0) <= 0 || order.status === 'paid')) setPaid(true)
+    setPaymentLoading(true)
+    try {
+      const res = await fetch(`${API}/payments/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: orderId, method: 'full' }),
+      })
+          if (res.ok) {
+            const json = await res.json().catch(() => null)
+            toast({ title: 'Payment successful', description: 'Thank you for your payment' })
+            if (json && json.order) {
+              applyOrderToState(json.order)
+            } else {
+              // fallback to full refetch
+              await fetchOrder()
+            }
+      } else {
+        const err = await res.json().catch(() => null)
+        toast({ title: 'Payment failed', description: err?.detail || 'Please try again' })
+      }
+    } finally {
+      setPaymentLoading(false)
     }
   }
 
   const handlePaySplit = async () => {
     if (!orderId) return
-    const res = await fetch(`${API}/payments/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      // do not send num_people here if split was already initialized; backend will use stored share
-      body: JSON.stringify({ order: orderId, method: 'split', participant: `p-${Math.random().toString(36).slice(2,8)}` }),
-    })
-    if (res.ok) {
-      const order = await fetchOrder()
-      if (order && (Number(order.remaining || 0) <= 0 || order.status === 'paid')) setPaid(true)
+    setPaymentLoading(true)
+    try {
+      const res = await fetch(`${API}/payments/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // do not send num_people here if split was already initialized; backend will use stored share
+        body: JSON.stringify({ order: orderId, method: 'split', participant: `p-${Math.random().toString(36).slice(2,8)}` }),
+      })
+          if (res.ok) {
+            const json = await res.json().catch(() => null)
+            toast({ title: 'Share paid', description: 'Your split share was recorded' })
+            if (json && json.order) {
+              applyOrderToState(json.order)
+            } else {
+              await fetchOrder()
+            }
+      } else {
+        const err = await res.json().catch(() => null)
+        toast({ title: 'Payment failed', description: err?.detail || 'Please try again' })
+      }
+    } finally {
+      setPaymentLoading(false)
     }
   }
 
@@ -193,14 +301,27 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
       itemsPayload.push({ order_item: orderItemId, quantity: qty })
     })
     if (itemsPayload.length === 0) return
-    const res = await fetch(`${API}/payments/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ order: orderId, method: 'item', items: itemsPayload, participant: `p-${Math.random().toString(36).slice(2,8)}` }),
-    })
-    if (res.ok) {
-      const order = await fetchOrder()
-      if (order && (Number(order.remaining || 0) <= 0 || order.status === 'paid')) setPaid(true)
+    setPaymentLoading(true)
+    try {
+      const res = await fetch(`${API}/payments/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: orderId, method: 'item', items: itemsPayload, participant: `p-${Math.random().toString(36).slice(2,8)}` }),
+      })
+          if (res.ok) {
+            const json = await res.json().catch(() => null)
+            toast({ title: 'Payment successful', description: 'Items have been paid' })
+            if (json && json.order) {
+              applyOrderToState(json.order)
+            } else {
+              await fetchOrder()
+            }
+      } else {
+        const err = await res.json().catch(() => null)
+        toast({ title: 'Payment failed', description: err?.detail || 'Please try again' })
+      }
+    } finally {
+      setPaymentLoading(false)
     }
   }
 
@@ -284,7 +405,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
               <Button
                 onClick={() => setPaymentMethod("full")}
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white py-6 text-base"
-                disabled={orderStatus === 'paid' || !orderId}
+                disabled={orderStatus === 'paid' || !orderId || paymentLoading}
               >
                 {t.payFull}
               </Button>
@@ -293,7 +414,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
                 onClick={handleSelectSplit}
                 variant="outline"
                 className="w-full py-6 text-base border-2"
-                disabled={orderStatus === 'paid' || !orderId}
+                disabled={orderStatus === 'paid' || !orderId || paymentLoading}
               >
                 {t.splitBill}
               </Button>
@@ -302,7 +423,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
                 onClick={() => setPaymentMethod("own")}
                 variant="outline"
                 className="w-full py-6 text-base border-2"
-                disabled={orderStatus === 'paid' || !orderId}
+                disabled={orderStatus === 'paid' || !orderId || paymentLoading}
               >
                 {t.payOwnItems}
               </Button>
@@ -385,7 +506,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
                           <div key={item.id} className="flex items-center justify-between">
                             <div>
                               <div className="font-semibold">{item.name}</div>
-                              <div className="text-xs text-slate-500">{item.quantity} available</div>
+                              <div className="text-xs text-slate-500">Unit: ${item.price.toFixed(2)} • {item.unpaid_quantity} remaining • Total: ${ (item.price * item.unpaid_quantity).toFixed(2) }</div>
                             </div>
                             <div className="flex items-center gap-2">
                               <button
@@ -399,7 +520,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
                               <button
                                 onClick={() => toggleSelectItem(item.id)}
                                 className="px-2 py-1 bg-slate-200 rounded"
-                                disabled={selectedQty >= item.quantity}
+                                disabled={selectedQty >= item.unpaid_quantity}
                               >
                                 +
                               </button>
@@ -410,16 +531,33 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
                     )}
                   </div>
 
-                  <Button onClick={handlePayItems} className="w-full bg-green-600 hover:bg-green-700 text-white py-6 text-base">
-                    {t.payMyShare}
+                  <Button onClick={handlePayItems} className="w-full bg-green-600 hover:bg-green-700 text-white py-6 text-base" disabled={paymentLoading}>
+                    {paymentLoading ? (
+                      <div className="flex items-center justify-center gap-2">
+                        <Spinner className="h-4 w-4 text-white" />
+                        <span>Paying...</span>
+                      </div>
+                    ) : (
+                      t.payMyShare
+                    )}
                   </Button>
                 </>
               ) : (
                 <Button
                   onClick={paymentMethod === 'split' ? handlePaySplit : handlePayFull}
                   className="w-full bg-green-600 hover:bg-green-700 text-white py-6 text-base"
+                  disabled={paymentLoading}
                 >
-                  {paymentMethod === "split" ? `${t.payMyShare}` : t.payMyShare}
+                  {paymentLoading ? (
+                    <div className="flex items-center justify-center gap-2">
+                      <Spinner className="h-4 w-4 text-white" />
+                      <span>Paying...</span>
+                    </div>
+                  ) : paymentMethod === "split" ? (
+                    `${t.payMyShare}`
+                  ) : (
+                    t.payMyShare
+                  )}
                 </Button>
               )}
 

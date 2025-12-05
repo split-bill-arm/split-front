@@ -1,6 +1,8 @@
 "use client"
 
 import { useState } from "react"
+import { useToast } from '@/hooks/use-toast'
+import { Spinner } from '@/components/ui/spinner'
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { mockMenu } from "@/lib/mock-data"
@@ -23,6 +25,8 @@ interface Props {
 export default function TableOrderInput({ tableId, onAddOrder, onClose, language }: Props) {
   const [selectedItems, setSelectedItems] = useState<Map<number, number>>(new Map())
   const [menu, setMenu] = useState<typeof mockMenu>(mockMenu)
+  const { toast } = useToast()
+  const [isAdding, setIsAdding] = useState(false)
   const t = translations[language]
 
   useEffect(() => {
@@ -73,6 +77,7 @@ export default function TableOrderInput({ tableId, onAddOrder, onClose, language
   }
 
   const handleSubmit = () => {
+    setIsAdding(true)
     const items = Array.from(selectedItems.entries()).map(([menuId, qty]) => {
       const item = menu.find((m) => m.id === menuId)
       return {
@@ -100,13 +105,16 @@ export default function TableOrderInput({ tableId, onAddOrder, onClose, language
         onAddOrder(tableId, items, calculateTotal())
         setSelectedItems(new Map())
         onClose()
+        toast({ title: 'Order added', description: 'Order created for table ' + tableId })
       })
       .catch(() => {
         // on error, still call parent (optimistic fallback)
         onAddOrder(tableId, items, calculateTotal())
         setSelectedItems(new Map())
         onClose()
+        toast({ title: 'Order queued', description: 'Order will be created shortly' })
       })
+      .finally(() => setIsAdding(false))
   }
 
   return (
@@ -148,10 +156,17 @@ export default function TableOrderInput({ tableId, onAddOrder, onClose, language
       </div>
 
       <div className="flex gap-3">
-        <Button onClick={handleSubmit} className="flex-1 bg-green-600 hover:bg-green-700">
-          {t.confirm}
+        <Button onClick={handleSubmit} className="flex-1 bg-green-600 hover:bg-green-700" disabled={isAdding}>
+          {isAdding ? (
+            <div className="flex items-center justify-center gap-2">
+              <Spinner className="h-4 w-4 text-white" />
+              <span>Adding...</span>
+            </div>
+          ) : (
+            t.confirm
+          )}
         </Button>
-        <Button onClick={onClose} variant="outline" className="flex-1 bg-transparent">
+        <Button onClick={onClose} variant="outline" className="flex-1 bg-transparent" disabled={isAdding}>
           {t.cancel}
         </Button>
       </div>
