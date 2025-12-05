@@ -448,30 +448,43 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
             <div className="space-y-4">
               {paymentMethod === "split" && (
                 <>
-                  <p className="font-semibold text-slate-900 mb-3">{t.people}</p>
-                  <div className="flex gap-2 mb-4">
-                    {[1, 2, 3, 4, 5, 6].map((num) => (
-                      <Button
-                        key={num}
-                        variant={numberOfPeople === num ? "default" : "outline"}
-                        onClick={() => setNumberOfPeople(num)}
-                        className="flex-1"
-                      >
-                        {num}
-                      </Button>
-                    ))}
-                    <input
-                      type="number"
-                      min="1"
-                      value={numberOfPeople}
-                      onChange={(e) => setNumberOfPeople(Math.max(1, Number.parseInt(e.target.value) || 1))}
-                      className="flex-1 px-2 py-2 border border-slate-300 rounded text-center"
-                    />
-                  </div>
+                  <p className="sr-only">{t.people}</p>
+                  {/* quick-picker moved into summary container below for cleaner layout */}
                 </>
               )}
 
-              <div className="bg-blue-50 p-4 rounded space-y-2">
+              <div className="bg-blue-50 p-4 rounded space-y-3">
+                {paymentMethod === 'split' && (
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm text-slate-700 font-medium">{t.people}</div>
+                      <div className="text-xs text-slate-500">Choose number of people</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {[2, 3, 4, 5, 6].map((num) => (
+                        <Button
+                          key={num}
+                          variant={numberOfPeople === num ? 'default' : 'outline'}
+                          onClick={() => setNumberOfPeople(num)}
+                          className="px-3 py-1"
+                        >
+                          {num}
+                        </Button>
+                      ))}
+                      <div className="flex items-center gap-2 ml-2">
+                        <input
+                          type="number"
+                          min="2"
+                          value={numberOfPeople}
+                          onChange={(e) => setNumberOfPeople(Math.max(2, Number.parseInt(e.target.value) || 2))}
+                          className="w-20 px-2 py-1 border border-slate-300 rounded text-center bg-white"
+                          aria-label="Custom people count"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex justify-between text-sm">
                   <span className="text-slate-600">{t.subtotal}</span>
                   <span className="font-semibold">${Number(billTotal || 0).toFixed(2)}</span>
