@@ -7,6 +7,15 @@ import { Button } from "@/components/ui/button"
 import { translations, type Language } from "@/lib/translations"
 import { useToast } from '@/hooks/use-toast'
 import { Spinner } from '@/components/ui/spinner'
+import BillSummary from '@/components/pay/BillSummary'
+import ItemsList from '@/components/pay/ItemsList'
+import PeoplePicker from '@/components/pay/PeoplePicker'
+import PaymentButtons from '@/components/pay/PaymentButtons'
+import { mapOrderItems, computeAmountPerPerson } from '@/lib/utils'
+import { postPayment } from '@/lib/services/payments'
+import { getOrders } from '@/lib/services/orders'
+import { getMenuItems } from '@/lib/services/menu'
+import { initSplit } from '@/lib/services/orders'
 
 export default function CustomerPayment({ params }: { params: Promise<{ tableId: string }> | { tableId: string } }) {
   const [language, setLanguage] = useState<Language>("en")
@@ -38,14 +47,13 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
   const fetchOrder = async () => {
     const tableId = Number(resolvedParams?.tableId)
     try {
-      const [ordersRes, menuRes] = await Promise.all([fetch(`${API}/orders/`), fetch(`${API}/menu-items/`)])
-      const ordersData = await ordersRes.json()
-      const menuData = await menuRes.json()
-      const menuList = Array.isArray(menuData) ? menuData : menuData.results || []
-      const allOrders = Array.isArray(ordersData) ? ordersData : ordersData.results || []
+      const [allOrders, menuList] = await Promise.all([getOrders(), getMenuItems()])
+
+      const menu = menuList || []
+      const orders = allOrders || []
 
       // prefer an open order for this table; fall back to latest if none open
-      const tableOrders = allOrders.filter((o: any) => o.table === tableId)
+      const tableOrders = orders.filter((o: any) => o.table === tableId)
       const openOrder = tableOrders.find((o: any) => o.status === 'open')
       tableOrders.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       const order = openOrder || (tableOrders.length > 0 ? tableOrders[0] : null)
@@ -65,18 +73,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
       }
 
       // map items using backend-provided fields (including unpaid_quantity and menu_item_name)
-      const mapped = (order.items || []).map((it: any) => {
-        const menuName = it.menu_item_name || (menuList.find((m: any) => m.id === (it.menu_item || it.menuId || null)) || {}).name || String(it.menu_item || it.menuId || 'Item')
-        return {
-          id: it.id,
-          name: menuName,
-          quantity: it.quantity || 1,
-          price: Number(it.price || 0),
-          paid_quantity: Number(it.paid_quantity || 0),
-          unpaid_quantity: Number(it.unpaid_quantity ?? Math.max(0, (it.quantity || 1) - (it.paid_quantity || 0))),
-          unpaid_amount: Number(it.unpaid_amount || 0),
-        }
-      })
+      const mapped = mapOrderItems(order, menu)
 
       setItems(mapped)
       const total = Number(order.bill_amount ?? mapped.reduce((s: number, it: any) => s + (Number(it.price || 0) * Number(it.quantity || 0)), 0))
@@ -115,18 +112,7 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
 
   // apply order object returned by backend directly to local state for immediate UI updates
   const applyOrderToState = (order: any) => {
-    const mapped = (order.items || []).map((it: any) => {
-      const menuName = it.menu_item_name || ''
-      return {
-        id: it.id,
-        name: menuName,
-        quantity: it.quantity || 1,
-        price: Number(it.price || 0),
-        paid_quantity: Number(it.paid_quantity || 0),
-        unpaid_quantity: Number(it.unpaid_quantity ?? Math.max(0, (it.quantity || 1) - (it.paid_quantity || 0))),
-        unpaid_amount: Number(it.unpaid_amount || 0),
-      }
-    })
+    const mapped = mapOrderItems(order)
 
     setItems(mapped)
     const total = Number(order.bill_amount ?? mapped.reduce((s: number, it: any) => s + (Number(it.price || 0) * Number(it.quantity || 0)), 0))
@@ -204,22 +190,14 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
     ;(async () => {
       if (!orderId) return
       try {
-        const res = await fetch(`${API}/orders/${orderId}/split/`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ people: numberOfPeople || 2, init: true }),
-        })
-        if (res.ok) {
-          const json = await res.json()
-          // refresh order and stored split info
+        const res = await initSplit(orderId, numberOfPeople || 2, true)
+        if (res.error) {
+          toast({ title: 'Split init failed', description: res.error.message || 'Could not initialize split' })
+        } else {
           await fetchOrder()
           toast({ title: 'Split initialized', description: `Split for ${numberOfPeople || 2} people` })
-        } else {
-          const err = await res.json().catch(() => null)
-          toast({ title: 'Split init failed', description: err?.detail || 'Could not initialize split' })
         }
       } catch (e) {
-        // ignore network errors but notify
         toast({ title: 'Network error', description: 'Could not initialize split' })
       }
     })()
@@ -237,17 +215,12 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
     ;(async () => {
       try {
         // If backend already stored a different split_num_people, the endpoint will return an error
-        const res = await fetch(`${API}/orders/${orderId}/split/`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ people: numberOfPeople, init: true }),
-        })
-        if (res.ok) {
+        const res = await initSplit(orderId, numberOfPeople, true)
+        if (res.error) {
+          toast({ title: 'Split update failed', description: res.error.message || 'Could not change split' })
+        } else {
           await fetchOrder()
           toast({ title: 'Split updated', description: `Split set to ${numberOfPeople} people` })
-        } else {
-          const err = await res.json().catch(() => null)
-          toast({ title: 'Split update failed', description: err?.detail || 'Could not change split' })
         }
       } catch (e) {
         toast({ title: 'Network error', description: 'Could not update split' })
@@ -281,25 +254,19 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
     if (!orderId) return
     setPaymentLoading(true)
     try {
-      const res = await fetch(`${API}/payments/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ order: orderId, method: 'full' }),
-      })
-          if (res.ok) {
-            const json = await res.json().catch(() => null)
-            toast({ title: 'Payment successful', description: 'Thank you for your payment' })
-            if (json && json.order) {
-              applyOrderToState(json.order)
-              setMethodLocked(null)
-            } else {
-              // fallback to full refetch
-              await fetchOrder()
-              setMethodLocked(null)
-            }
+      const res = await postPayment({ order: orderId, method: 'full' })
+      if (res.error) {
+        toast({ title: 'Payment failed', description: res.error.message || 'Please try again' })
       } else {
-        const err = await res.json().catch(() => null)
-        toast({ title: 'Payment failed', description: err?.detail || 'Please try again' })
+        const data = res.data as any
+        toast({ title: 'Payment successful', description: 'Thank you for your payment' })
+        if (data && data.order) {
+          applyOrderToState(data.order)
+          setMethodLocked(null)
+        } else {
+          await fetchOrder()
+          setMethodLocked(null)
+        }
       }
     } finally {
       setPaymentLoading(false)
@@ -310,25 +277,19 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
     if (!orderId) return
     setPaymentLoading(true)
     try {
-      const res = await fetch(`${API}/payments/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // do not send num_people here if split was already initialized; backend will use stored share
-        body: JSON.stringify({ order: orderId, method: 'split', participant: `p-${Math.random().toString(36).slice(2,8)}` }),
-      })
-          if (res.ok) {
-            const json = await res.json().catch(() => null)
-            toast({ title: 'Share paid', description: 'Your split share was recorded' })
-            if (json && json.order) {
-              applyOrderToState(json.order)
-              setMethodLocked(null)
-            } else {
-              await fetchOrder()
-              setMethodLocked(null)
-            }
+      const res = await postPayment({ order: orderId, method: 'split', participant: `p-${Math.random().toString(36).slice(2,8)}` })
+      if (res.error) {
+        toast({ title: 'Payment failed', description: res.error.message || 'Please try again' })
       } else {
-        const err = await res.json().catch(() => null)
-        toast({ title: 'Payment failed', description: err?.detail || 'Please try again' })
+        const data = res.data as any
+        toast({ title: 'Share paid', description: 'Your split share was recorded' })
+        if (data && data.order) {
+          applyOrderToState(data.order)
+          setMethodLocked(null)
+        } else {
+          await fetchOrder()
+          setMethodLocked(null)
+        }
       }
     } finally {
       setPaymentLoading(false)
@@ -344,24 +305,19 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
     if (itemsPayload.length === 0) return
     setPaymentLoading(true)
     try {
-      const res = await fetch(`${API}/payments/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ order: orderId, method: 'item', items: itemsPayload, participant: `p-${Math.random().toString(36).slice(2,8)}` }),
-      })
-          if (res.ok) {
-            const json = await res.json().catch(() => null)
-            toast({ title: 'Payment successful', description: 'Items have been paid' })
-            if (json && json.order) {
-              applyOrderToState(json.order)
-              setMethodLocked(null)
-            } else {
-              await fetchOrder()
-              setMethodLocked(null)
-            }
+      const res = await postPayment({ order: orderId, method: 'item', items: itemsPayload, participant: `p-${Math.random().toString(36).slice(2,8)}` })
+      if (res.error) {
+        toast({ title: 'Payment failed', description: res.error.message || 'Please try again' })
       } else {
-        const err = await res.json().catch(() => null)
-        toast({ title: 'Payment failed', description: err?.detail || 'Please try again' })
+        const data = res.data as any
+        toast({ title: 'Payment successful', description: 'Items have been paid' })
+        if (data && data.order) {
+          applyOrderToState(data.order)
+          setMethodLocked(null)
+        } else {
+          await fetchOrder()
+          setMethodLocked(null)
+        }
       }
     } finally {
       setPaymentLoading(false)
@@ -396,29 +352,6 @@ export default function CustomerPayment({ params }: { params: Promise<{ tableId:
         <div className="p-6 border-b border-slate-200 flex justify-between items-center">
           <div className="flex items-center gap-4">
             <h1 className="text-2xl font-bold text-slate-900">Pay Your Bill</h1>
-              <div className="flex items-center gap-2">
-              <a
-                href={`/pay/${resolvedParams?.tableId}`}
-                target="_blank"
-                rel="noreferrer"
-                className="text-sm text-blue-600 underline"
-              >
-                Open link
-              </a>
-              <button
-                onClick={() => {
-                  try {
-                    const url = typeof window !== 'undefined' ? window.location.href : `/pay/${resolvedParams?.tableId}`
-                    navigator.clipboard.writeText(url)
-                  } catch (e) {
-                    // ignore
-                  }
-                }}
-                className="text-xs text-slate-600 underline"
-              >
-                Copy
-              </button>
-            </div>
           </div>
           <div className="flex gap-2">
             {(["en", "ru", "hy"] as Language[]).map((lang) => (

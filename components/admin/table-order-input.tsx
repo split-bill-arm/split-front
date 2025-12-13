@@ -8,7 +8,9 @@ import { Button } from "@/components/ui/button"
 import { mockMenu } from "@/lib/mock-data"
 import { useEffect } from "react"
 import { translations, type Language } from "@/lib/translations"
-import { API_BASE } from '@/lib/api'
+import { getMenuItems } from '@/lib/services/menu'
+import { postOrder } from '@/lib/services/orders'
+import { sumItems } from '@/lib/utils'
 
 interface MenuItem {
   id: number
@@ -32,22 +34,23 @@ export default function TableOrderInput({ tableId, onAddOrder, onClose, language
 
   useEffect(() => {
     // Fetch menu items from backend; fallback to mockMenu on error
-    fetch(`${API_BASE}/menu-items/`)
-      .then((r) => r.json())
+    getMenuItems()
       .then((data) => {
-        const list = Array.isArray(data) ? data : data && data.results ? data.results : null
+        console.debug('[TableOrderInput] fetched menu items:', data)
+        const list = data || null
         if (list) {
-          // normalize price to number (backend may return strings)
           const normalized = list.map((m: any) => ({ ...m, price: Number(m.price) }))
           setMenu(normalized)
         }
       })
       .catch(() => {
+        console.error('[TableOrderInput] failed to fetch menu items, using mock menu')
         // keep mock menu
       })
   }, [])
 
   const addItem = (menuId: number) => {
+    console.debug('[TableOrderInput] addItem', menuId)
     setSelectedItems((prev) => {
       const newMap = new Map(prev)
       newMap.set(menuId, (newMap.get(menuId) || 0) + 1)
@@ -56,6 +59,7 @@ export default function TableOrderInput({ tableId, onAddOrder, onClose, language
   }
 
   const removeItem = (menuId: number) => {
+    console.debug('[TableOrderInput] removeItem', menuId)
     setSelectedItems((prev) => {
       const newMap = new Map(prev)
       const current = newMap.get(menuId) || 0
@@ -74,6 +78,7 @@ export default function TableOrderInput({ tableId, onAddOrder, onClose, language
       const item = menu.find((m) => m.id === menuId)
       if (item) total += Number(item.price || 0) * qty
     })
+    console.debug('[TableOrderInput] calculateTotal', total)
     return total
   }
 
@@ -89,27 +94,26 @@ export default function TableOrderInput({ tableId, onAddOrder, onClose, language
       }
     })
 
-    // Send to backend
-    const payload = {
-      table: tableId,
-      items: items.map((i) => ({ menu_item: i.menuId, quantity: i.quantity })),
-    }
+    console.debug('[TableOrderInput] handleSubmit, tableId:', tableId, 'items:', items)
+    // Send to backend using services
+    const payload = items.map((i) => ({ menu_item: i.menuId, quantity: i.quantity }))
+    postOrder(tableId, payload)
+      .then((res) => {
+        console.debug('[TableOrderInput] postOrder response:', res)
+        if (res.error) {
+          // optimistic fallback
+          onAddOrder(tableId, items, calculateTotal())
+          toast({ title: 'Order queued', description: 'Order will be created shortly' })
+        } else {
+          onAddOrder(tableId, items, calculateTotal())
+          toast({ title: 'Order added', description: 'Order created for table ' + tableId })
+        }
 
-    fetch(`${API_BASE}/orders/create-for-table/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        // call parent callback with created order data
-        onAddOrder(tableId, items, calculateTotal())
         setSelectedItems(new Map())
         onClose()
-        toast({ title: 'Order added', description: 'Order created for table ' + tableId })
       })
       .catch(() => {
-        // on error, still call parent (optimistic fallback)
+        console.error('[TableOrderInput] postOrder failed, queued locally')
         onAddOrder(tableId, items, calculateTotal())
         setSelectedItems(new Map())
         onClose()
