@@ -85,3 +85,26 @@ import { twMerge } from 'tailwind-merge'
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
+
+// Helpers for manipulating selected-item maps
+export function incrementSelectedItemMap(
+  prev: Map<number, number>,
+  items: Array<{ id: number; unpaid_quantity?: number; price?: number }>,
+  orderItemId: number
+) {
+  const m = new Map(prev)
+  const current = m.get(orderItemId) || 0
+  const it = items.find((it) => it.id === orderItemId)
+  const max = it ? Number(it.unpaid_quantity || 0) : 0
+  if (current >= max) return m
+  m.set(orderItemId, current + 1)
+  return m
+}
+
+export function decrementSelectedItemMap(prev: Map<number, number>, orderItemId: number) {
+  const m = new Map(prev)
+  const current = m.get(orderItemId) || 0
+  if (current <= 1) m.delete(orderItemId)
+  else m.set(orderItemId, current - 1)
+  return m
+}
