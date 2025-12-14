@@ -8,7 +8,8 @@ import { translations, type Language } from "@/lib/translations"
 import TableOrderInput from "@/components/admin/table-order-input"
 import OpenOrdersView from "@/components/admin/open-orders-view"
 import type { TableBill } from "@/lib/types"
-import { API_BASE } from '@/lib/api'
+import { getOrders, getTables } from '@/lib/services/orders'
+import { getMenuItems } from '@/lib/services/menu'
 
 export default function AdminPanel({ params }: { params: Promise<{ restaurantId: string }> | { restaurantId: string } }) {
   const [language, setLanguage] = useState<Language>("en")
@@ -35,32 +36,25 @@ export default function AdminPanel({ params }: { params: Promise<{ restaurantId:
     )
   }
 
-  const API = API_BASE
-
   const fetchOrders = async () => {
     try {
-      const [ordersRes, menuRes] = await Promise.all([
-        fetch(`${API}/orders/`),
-        fetch(`${API}/menu-items/`),
-      ])
-      const ordersData = await ordersRes.json()
-      const menuData = await menuRes.json()
-      const menuList = Array.isArray(menuData) ? menuData : menuData.results || []
-      setMenu(menuList)
+      const [allOrders, menuList] = await Promise.all([getOrders(), getMenuItems()])
+      if (!allOrders) return
+      const menu = menuList || []
+      setMenu(menu)
 
-      // find open orders for our selected table (if any)
-      const allOrders = Array.isArray(ordersData) ? ordersData : ordersData.results || []
-      const table = tables[0]
+
+      const table = tables.find((t: any) => t.id === selectedTable)
       if (!table) return
 
-      const openOrders = allOrders.filter((o: any) => o.table === table.id && o.status === "open")
+      const openOrders = allOrders.filter((o: any) => o.table === table.id && o.status === 'open')
 
       const billsFromOrders: TableBill[] = openOrders.map((o: any) => {
         const items = (o.items || []).map((it: any) => {
-          const menuItem = menuList.find((m: any) => m.id === (it.menu_item || it.menuItem || it.menuId))
+          const menuItem = menu.find((m: any) => m.id === (it.menu_item || it.menuItem || it.menuId))
           return {
             menuId: it.menu_item || it.menuId || null,
-            name: menuItem ? menuItem.name : String(it.menu_item || it.menuId || "Item"),
+            name: menuItem ? menuItem.name : String(it.menu_item || it.menuId || 'Item'),
             quantity: it.quantity || 1,
             price: Number(it.price || 0),
           }
@@ -83,20 +77,21 @@ export default function AdminPanel({ params }: { params: Promise<{ restaurantId:
 
   useEffect(() => {
     // fetch tables and pick the first one only
-    const API = API_BASE
-    fetch(`${API}/tables/`)
-      .then((r) => r.json())
-      .then((data) => {
-        const list = Array.isArray(data) ? data : data.results || []
-        setTables(list)
-        if (list.length > 0) {
-          setSelectedTable(list[0].id)
-        }
+    getTables()
+      .then((list) => {
+        console.log('Fetched tables:', list)
+        const arr = list || []
+        setTables(arr)
+        if (arr.length > 0) setSelectedTable(arr[0].id)
       })
-      .catch(() => {})
+      .catch((err) => {
+        console.error('Error fetching tables:', err)
+      })
   }, [])
 
+
   useEffect(() => {
+    console.log('Tables state:', tables)
     if (tables.length > 0) fetchOrders()
     // poll for updates so admin sees payments made from the pay page
     const id = setInterval(() => {
@@ -104,6 +99,12 @@ export default function AdminPanel({ params }: { params: Promise<{ restaurantId:
     }, 5000)
     return () => clearInterval(id)
   }, [tables])
+
+  useEffect(() => {
+    if (selectedTable && tables.length > 0) {
+      fetchOrders();
+    }
+  }, [selectedTable]);
 
   return (
     <div className="min-h-screen bg-slate-50 p-6">
@@ -136,23 +137,25 @@ export default function AdminPanel({ params }: { params: Promise<{ restaurantId:
 
           <TabsContent value="tables" className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {tables.length > 0 ? (
-                <Card
-                  key={tables[0].id}
-                  className="p-4 cursor-pointer hover:shadow-lg transition-shadow"
-                  onClick={() => setSelectedTable(tables[0].id)}
-                >
-                  <h3 className="font-bold text-slate-900">
-                    {t.table} {tables[0].number || tables[0].id}
-                  </h3>
-                  <p className="text-xs text-slate-500 my-2">{tables[0].qr_code || tables[0].qrCode || ''}</p>
-                  <Button variant="outline" className="w-full bg-transparent" size="sm">
-                    {selectedTable === tables[0].id ? t.addItems : t.addItems}
-                  </Button>
-                </Card>
-              ) : (
-                <div className="text-slate-600">No tables configured in backend.</div>
-              )}
+                {tables.length > 0 ? (
+                  tables.map((table) => (
+                    <Card
+                      key={table.id}
+                      className="p-4 cursor-pointer hover:shadow-lg transition-shadow"
+                      onClick={() => setSelectedTable(table.id)}
+                    >
+                      <h3 className="font-bold text-slate-900">
+                        {t.table} {table.number || table.id}
+                      </h3>
+                      <p className="text-xs text-slate-500 my-2">{table.qr_code || table.qrCode || ''}</p>
+                      <Button variant="outline" className="w-full bg-transparent" size="sm">
+                        {selectedTable === table.id ? t.addItems : t.addItems}
+                      </Button>
+                    </Card>
+                  ))
+                ) : (
+                  <div className="text-slate-600">No tables configured in backend.</div>
+                )}
             </div>
 
             {selectedTable && (
