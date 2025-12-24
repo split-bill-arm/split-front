@@ -9,10 +9,20 @@ export default function MockPay() {
   const sp = useSearchParams();
 
   const paymentIntentId = sp.get("paymentIntentId");
+  const holdId = sp.get("holdId");
   const tableToken = sp.get("tableToken") ?? "table-1";
 
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+
+  async function releaseHoldIfPossible() {
+    if (!holdId) return;
+    try {
+      await apiPost(`/public/hold/${holdId}/release/`, {});
+    } catch {
+      // ignore release errors (hold might be consumed/expired)
+    }
+  }
 
   async function confirm(outcome: "paid" | "failed") {
     if (!paymentIntentId) return;
@@ -20,9 +30,28 @@ export default function MockPay() {
     setMsg(null);
     try {
       await apiPost(`/public/payment_intents/${paymentIntentId}/confirm/`, { outcome });
+
+      // If failed, release reserved amount immediately (better UX)
+      if (outcome === "failed") {
+        await releaseHoldIfPossible();
+      }
+
       router.push(`/pay/${encodeURIComponent(tableToken)}`);
     } catch (e: any) {
       setMsg(e?.message ?? "Failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancel() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await releaseHoldIfPossible();
+      router.push(`/pay/${encodeURIComponent(tableToken)}`);
+    } catch (e: any) {
+      setMsg(e?.message ?? "Failed to cancel");
     } finally {
       setBusy(false);
     }
@@ -32,6 +61,7 @@ export default function MockPay() {
     <main className="p-6 space-y-4">
       <h1 className="text-xl font-semibold">Mock Pay</h1>
       <div className="text-sm text-gray-600">paymentIntentId: {paymentIntentId ?? "missing"}</div>
+      <div className="text-sm text-gray-600">holdId: {holdId ?? "missing"}</div>
 
       {msg && <div className="rounded border border-red-300 bg-red-50 p-3 text-sm">{msg}</div>}
 
@@ -43,12 +73,21 @@ export default function MockPay() {
         >
           Simulate Success
         </button>
+
         <button
           className="rounded bg-red-600 px-4 py-2 text-white disabled:opacity-50"
           disabled={busy || !paymentIntentId}
           onClick={() => confirm("failed")}
         >
           Simulate Fail
+        </button>
+
+        <button
+          className="rounded border px-4 py-2 disabled:opacity-50"
+          disabled={busy}
+          onClick={cancel}
+        >
+          Cancel
         </button>
       </div>
     </main>
