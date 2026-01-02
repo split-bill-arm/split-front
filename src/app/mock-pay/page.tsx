@@ -1,10 +1,10 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { apiPost } from "@/lib/api";
 
-export default function MockPay() {
+function MockPayInner() {
   const router = useRouter();
   const sp = useSearchParams();
 
@@ -20,7 +20,7 @@ export default function MockPay() {
     try {
       await apiPost(`/public/hold/${holdId}/release/`, {});
     } catch {
-      // ignore release errors (hold might be consumed/expired)
+      // ignore
     }
   }
 
@@ -31,7 +31,6 @@ export default function MockPay() {
     try {
       await apiPost(`/public/payment_intents/${paymentIntentId}/confirm/`, { outcome });
 
-      // If failed, release reserved amount immediately (better UX)
       if (outcome === "failed") {
         await releaseHoldIfPossible();
       }
@@ -82,14 +81,18 @@ export default function MockPay() {
           Simulate Fail
         </button>
 
-        <button
-          className="rounded border px-4 py-2 disabled:opacity-50"
-          disabled={busy}
-          onClick={cancel}
-        >
+        <button className="rounded border px-4 py-2 disabled:opacity-50" disabled={busy} onClick={cancel}>
           Cancel
         </button>
       </div>
     </main>
+  );
+}
+
+export default function MockPay() {
+  return (
+    <Suspense fallback={<main className="p-6">Loading…</main>}>
+      <MockPayInner />
+    </Suspense>
   );
 }
