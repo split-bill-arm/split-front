@@ -4,21 +4,23 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { apiGet, apiPost } from "@/lib/api";
 import { Button, Card, Input, Pill } from "@/components/ui";
+import { normalizeTableToken } from "@/lib/tableToken";
 
 type CheckItem = {
   id: string;
   name: string;
-  qty: number;
+  qty: number | string; // backend may return "1"
   unitPrice: number;
   totalPrice: number;
 };
 
 type SessionResp = {
   session: { id: string; table: { label: string; token: string }; currency: string; status: string };
-  check: { total: number; paid: number; currency: string; items: CheckItem[] };
+  check: { total: number; paid: number; currency: string; items: CheckItem[] } | null;
   reservedTotal: number;
   paidTotal?: number;
-  remaining: number;
+  remaining: number | null;
+  syncing?: boolean;
 };
 
 type SplitMode = "amount" | "even" | "items";
@@ -36,10 +38,30 @@ function modeButtonClass(isActive: boolean) {
   ].join(" ");
 }
 
+function safeInt(v: string) {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function qtyNum(qty: number | string): number {
+  const n = typeof qty === "string" ? parseInt(qty, 10) : qty;
+  return Number.isFinite(n) ? n : 0;
+}
+
 export default function PayPage() {
   const router = useRouter();
   const params = useParams<{ tableToken: string }>();
-  const tableToken = params.tableToken;
+
+  const rawToken = params.tableToken;
+  const tableToken = normalizeTableToken(rawToken);
+
+  // If user opens /pay/1, normalize to /pay/table-1
+  useEffect(() => {
+    if (rawToken !== tableToken) {
+      router.replace(`/pay/${encodeURIComponent(tableToken)}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawToken, tableToken]);
 
   const [data, setData] = useState<SessionResp | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -62,23 +84,27 @@ export default function PayPage() {
         setData(res);
         setError(null);
 
+        const items = res.check?.items ?? [];
+
         setItemsSel((prev) => {
           const next: Record<string, ItemSelection> = { ...prev };
 
-          for (const it of res.check.items) {
+          for (const it of items) {
+            const q = qtyNum(it.qty);
+
             if (!next[it.id]) {
               next[it.id] = { qtySelected: 0, sharedEnabled: false, sharedBetween: 2 };
             } else {
               next[it.id] = {
                 ...next[it.id],
-                qtySelected: Math.max(0, Math.min(it.qty, next[it.id].qtySelected)),
+                qtySelected: Math.max(0, Math.min(q, next[it.id].qtySelected)),
                 sharedBetween: Math.max(2, next[it.id].sharedBetween || 2),
               };
             }
           }
 
           for (const k of Object.keys(next)) {
-            if (!res.check.items.find((i) => i.id === k)) delete next[k];
+            if (!items.find((i) => i.id === k)) delete next[k];
           }
 
           return next;
@@ -96,34 +122,41 @@ export default function PayPage() {
     };
   }, [tableToken]);
 
-  const remaining = data?.remaining ?? 0;
+  const check = data?.check ?? null;
+  const items = check?.items ?? [];
+  const remaining = data?.remaining; // can be null while loading/syncing
+  const currency = data?.session.currency ?? "AMD";
 
   const { toPay, toPayReason } = useMemo(() => {
     if (!data) return { toPay: 0, toPayReason: "" };
+    if (!check) return { toPay: 0, toPayReason: "Loading bill..." };
 
     if (mode === "amount") {
-      const amt = parseInt(amountStr, 10);
+      const amt = safeInt(amountStr);
       if (!Number.isFinite(amt) || amt <= 0) return { toPay: 0, toPayReason: "Enter an amount" };
       return { toPay: amt, toPayReason: "" };
     }
 
     if (mode === "even") {
-      const n = parseInt(peopleCountStr, 10);
+      if (remaining == null) return { toPay: 0, toPayReason: "Loading bill..." };
+      const n = safeInt(peopleCountStr);
       if (!Number.isFinite(n) || n <= 0) return { toPay: 0, toPayReason: "Enter people count" };
       const per = Math.ceil(remaining / n);
       if (per <= 0) return { toPay: 0, toPayReason: "Nothing remaining" };
       return { toPay: per, toPayReason: "" };
     }
 
+    // items mode
     let sum = 0;
-    for (const it of data.check.items) {
+    for (const it of items) {
       const sel = itemsSel[it.id];
       if (!sel) continue;
 
-      const qtySel = Math.max(0, Math.min(it.qty, sel.qtySelected));
+      const q = qtyNum(it.qty);
+      const qtySel = Math.max(0, Math.min(q, sel.qtySelected));
       if (qtySel <= 0) continue;
 
-      if (it.qty === 1 && sel.sharedEnabled) {
+      if (q === 1 && sel.sharedEnabled) {
         const n = Math.max(2, sel.sharedBetween || 2);
         sum += Math.ceil(it.totalPrice / n);
       } else {
@@ -133,11 +166,29 @@ export default function PayPage() {
 
     if (sum <= 0) return { toPay: 0, toPayReason: "Select items" };
     return { toPay: sum, toPayReason: "" };
-  }, [data, mode, amountStr, peopleCountStr, itemsSel, remaining]);
+  }, [data, check, mode, amountStr, peopleCountStr, itemsSel, remaining, items]);
 
   async function reserveAndPay(amount: number) {
+    if (!check) {
+      setError("Bill not loaded yet");
+      return;
+    }
+    if (remaining == null) {
+      setError("Bill is syncing, try again in a moment");
+      return;
+    }
+    if (amount <= 0) {
+      setError("Invalid amount");
+      return;
+    }
+    if (amount > remaining) {
+      setError("Amount exceeds remaining");
+      return;
+    }
+
     setBusy(true);
     setError(null);
+
     try {
       const clientHoldKey = crypto.randomUUID();
 
@@ -147,13 +198,31 @@ export default function PayPage() {
         clientHoldKey,
       });
 
-      const piResp = await apiPost<{ paymentIntent: { id: string } }>(`/public/payment_intents/`, {
+      const piResp = await apiPost<{ paymentIntent: { id: string }; redirectUrl?: string }>(`/public/payment_intents/`, {
         holdId: holdResp.hold.id,
       });
 
-      router.push(
-        `/mock-pay?paymentIntentId=${piResp.paymentIntent.id}&holdId=${holdResp.hold.id}&tableToken=${encodeURIComponent(tableToken)}`,
-      );
+      const base =
+        piResp.redirectUrl ??
+        `/mock-pay?paymentIntentId=${piResp.paymentIntent.id}&holdId=${holdResp.hold.id}&tableToken=${encodeURIComponent(
+          tableToken,
+        )}`;
+
+      let finalUrl = base;
+
+      try {
+        const u = new URL(base, window.location.origin);
+        if (u.pathname.includes("/mock-pay")) {
+          u.searchParams.set("paymentIntentId", piResp.paymentIntent.id);
+          u.searchParams.set("holdId", holdResp.hold.id);
+          u.searchParams.set("tableToken", tableToken);
+          finalUrl = u.toString();
+        }
+      } catch {
+        // ignore
+      }
+
+      window.location.assign(finalUrl);
     } catch (e: any) {
       setError(e?.message ?? "Failed to reserve/pay");
     } finally {
@@ -187,13 +256,15 @@ export default function PayPage() {
   }
 
   function resetSelections() {
-    if (!data) return;
+    if (!check) return;
     const next: Record<string, ItemSelection> = {};
-    for (const it of data.check.items) {
+    for (const it of items) {
       next[it.id] = { qtySelected: 0, sharedEnabled: false, sharedBetween: 2 };
     }
     setItemsSel(next);
   }
+
+  const disableControls = busy || !check;
 
   return (
     <div className="space-y-6">
@@ -201,7 +272,11 @@ export default function PayPage() {
         <div className="space-y-1">
           <Pill tone="info">Table payment</Pill>
           <h1 className="text-2xl font-semibold text-slate-900">Split your bill</h1>
-          <div className="text-sm text-slate-600">Table: {data?.session.table.label ?? tableToken}</div>
+          <div className="text-sm text-slate-600">
+            Table: {data?.session.table.label ?? tableToken}
+            {data?.syncing ? <span className="text-xs text-slate-500"> · syncing…</span> : null}
+          </div>
+          <div className="text-xs text-slate-500">Currency: {currency}</div>
         </div>
         <div className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-600">
           Status: <span className="font-semibold text-slate-900">{data?.session.status ?? "Loading"}</span>
@@ -214,24 +289,42 @@ export default function PayPage() {
         <Card className="p-6">
           <div className="space-y-3">
             <div className="text-sm font-semibold text-slate-900">Bill summary</div>
-            <div className="space-y-2 text-sm text-slate-600">
-              <div className="flex items-center justify-between">
-                <span>Total</span>
-                <span className="font-medium text-slate-900">{data?.check.total ?? "--"}</span>
+
+            {!check ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                Loading bill from POS…
               </div>
-              <div className="flex items-center justify-between">
-                <span>Paid</span>
-                <span className="font-medium text-slate-900">{data?.paidTotal ?? data?.check.paid ?? 0}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Reserved</span>
-                <span className="font-medium text-slate-900">{data?.reservedTotal ?? 0}</span>
-              </div>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <div className="text-xs uppercase tracking-wide text-slate-500">Remaining</div>
-              <div className="text-2xl font-semibold text-slate-900">{remaining}</div>
-            </div>
+            ) : (
+              <>
+                <div className="space-y-2 text-sm text-slate-600">
+                  <div className="flex items-center justify-between">
+                    <span>Total</span>
+                    <span className="font-medium text-slate-900">
+                      {check.total} {currency}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Paid</span>
+                    <span className="font-medium text-slate-900">
+                      {(data?.paidTotal ?? check.paid ?? 0)} {currency}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Reserved</span>
+                    <span className="font-medium text-slate-900">
+                      {(data?.reservedTotal ?? 0)} {currency}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-xs uppercase tracking-wide text-slate-500">Remaining</div>
+                  <div className="text-2xl font-semibold text-slate-900">
+                    {remaining == null ? "—" : `${remaining} ${currency}`}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </Card>
 
@@ -239,7 +332,7 @@ export default function PayPage() {
           <div className="space-y-4">
             <div className="flex flex-wrap gap-2">
               {(["amount", "even", "items"] as const).map((m) => (
-                <button key={m} className={modeButtonClass(mode === m)} onClick={() => setMode(m)} disabled={busy}>
+                <button key={m} className={modeButtonClass(mode === m)} onClick={() => setMode(m)} disabled={disableControls}>
                   {m === "amount" ? "By amount" : m === "even" ? "Even split" : "By items"}
                 </button>
               ))}
@@ -253,6 +346,7 @@ export default function PayPage() {
                   onChange={(e) => setAmountStr(e.target.value)}
                   inputMode="numeric"
                   className="text-base"
+                  disabled={disableControls}
                 />
               </div>
             )}
@@ -266,10 +360,11 @@ export default function PayPage() {
                     value={peopleCountStr}
                     onChange={(e) => setPeopleCountStr(e.target.value)}
                     inputMode="numeric"
+                    disabled={disableControls}
                   />
                 </div>
                 <div className="text-sm text-slate-600">
-                  You pay: <span className="font-semibold text-slate-900">{toPay}</span>
+                  You pay: <span className="font-semibold text-slate-900">{toPay}</span> {currency}
                 </div>
               </div>
             )}
@@ -278,76 +373,81 @@ export default function PayPage() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between text-sm text-slate-600">
                   <span>Select items (qty)</span>
-                  <Button variant="ghost" className="h-8 px-3 text-xs" onClick={resetSelections} disabled={busy}>
+                  <Button variant="ghost" className="h-8 px-3 text-xs" onClick={resetSelections} disabled={disableControls}>
                     Reset
                   </Button>
                 </div>
 
-                <ul className="space-y-3">
-                  {(data?.check.items ?? []).map((it) => {
-                    const sel = itemsSel[it.id] ?? { qtySelected: 0, sharedEnabled: false, sharedBetween: 2 };
+                {!check ? (
+                  <div className="text-sm text-slate-600">Loading items…</div>
+                ) : (
+                  <ul className="space-y-3">
+                    {items.map((it) => {
+                      const sel = itemsSel[it.id] ?? { qtySelected: 0, sharedEnabled: false, sharedBetween: 2 };
+                      const q = qtyNum(it.qty);
 
-                    return (
-                      <li key={it.id} className="rounded-xl border border-slate-200 bg-white p-4">
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div>
-                            <div className="text-sm font-semibold text-slate-900">{it.name}</div>
-                            <div className="text-xs text-slate-500">
-                              {it.qty} x {it.unitPrice} = {it.totalPrice}
+                      return (
+                        <li key={it.id} className="rounded-xl border border-slate-200 bg-white p-4">
+                          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                              <div className="text-sm font-semibold text-slate-900">{it.name}</div>
+                              <div className="text-xs text-slate-500">
+                                {q} x {it.unitPrice} = {it.totalPrice}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <button
+                                className="h-8 w-8 rounded-lg border border-slate-200 text-slate-600"
+                                onClick={() => setItemQty(it.id, Math.max(0, sel.qtySelected - 1))}
+                                disabled={disableControls || sel.qtySelected <= 0}
+                              >
+                                -
+                              </button>
+                              <div className="w-8 text-center text-sm font-semibold text-slate-900">{sel.qtySelected}</div>
+                              <button
+                                className="h-8 w-8 rounded-lg border border-slate-200 text-slate-600"
+                                onClick={() => setItemQty(it.id, Math.min(q, sel.qtySelected + 1))}
+                                disabled={disableControls || sel.qtySelected >= q}
+                              >
+                                +
+                              </button>
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-2">
-                            <button
-                              className="h-8 w-8 rounded-lg border border-slate-200 text-slate-600"
-                              onClick={() => setItemQty(it.id, Math.max(0, sel.qtySelected - 1))}
-                              disabled={busy || sel.qtySelected <= 0}
-                            >
-                              -
-                            </button>
-                            <div className="w-8 text-center text-sm font-semibold text-slate-900">{sel.qtySelected}</div>
-                            <button
-                              className="h-8 w-8 rounded-lg border border-slate-200 text-slate-600"
-                              onClick={() => setItemQty(it.id, Math.min(it.qty, sel.qtySelected + 1))}
-                              disabled={busy || sel.qtySelected >= it.qty}
-                            >
-                              +
-                            </button>
-                          </div>
-                        </div>
+                          {q === 1 && sel.qtySelected === 1 && (
+                            <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-slate-600">
+                              <label className="flex items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={sel.sharedEnabled}
+                                  onChange={(e) => toggleShared(it.id, e.target.checked)}
+                                  disabled={disableControls}
+                                />
+                                Shared
+                              </label>
 
-                        {it.qty === 1 && sel.qtySelected === 1 && (
-                          <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-slate-600">
-                            <label className="flex items-center gap-2">
-                              <input
-                                type="checkbox"
-                                checked={sel.sharedEnabled}
-                                onChange={(e) => toggleShared(it.id, e.target.checked)}
-                                disabled={busy}
-                              />
-                              Shared
-                            </label>
-
-                            <div className={`flex items-center gap-2 ${sel.sharedEnabled ? "" : "opacity-50"}`}>
-                              <span className="text-xs">between</span>
-                              <Input
-                                className="w-16 px-2 py-1 text-xs"
-                                value={String(sel.sharedBetween ?? 2)}
-                                onChange={(e) => setSharedBetween(it.id, parseInt(e.target.value, 10) || 2)}
-                                inputMode="numeric"
-                                disabled={busy || !sel.sharedEnabled}
-                              />
-                              <span className="text-xs">people</span>
+                              <div className={`flex items-center gap-2 ${sel.sharedEnabled ? "" : "opacity-50"}`}>
+                                <span className="text-xs">between</span>
+                                <Input
+                                  className="w-16 px-2 py-1 text-xs"
+                                  value={String(sel.sharedBetween ?? 2)}
+                                  onChange={(e) => setSharedBetween(it.id, parseInt(e.target.value, 10) || 2)}
+                                  inputMode="numeric"
+                                  disabled={disableControls || !sel.sharedEnabled}
+                                />
+                                <span className="text-xs">people</span>
+                              </div>
                             </div>
-                          </div>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
 
                 <div className="text-sm text-slate-600">
-                  You pay: <span className="font-semibold text-slate-900">{toPay}</span>
+                  You pay: <span className="font-semibold text-slate-900">{toPay}</span> {currency}
                 </div>
                 <div className="text-xs text-slate-500">
                   Item sharing is an estimate; the reserved amount confirms the final balance.
@@ -357,15 +457,15 @@ export default function PayPage() {
 
             <div className="flex flex-col gap-3 pt-2 sm:flex-row sm:items-center sm:justify-between">
               <div className="text-sm text-slate-600">
-                To pay: <span className="font-semibold text-slate-900">{toPay}</span>
+                To pay: <span className="font-semibold text-slate-900">{toPay}</span> {currency}
                 {toPayReason ? <span className="text-xs text-slate-500"> · {toPayReason}</span> : null}
               </div>
 
               <Button
                 variant="secondary"
                 onClick={() => reserveAndPay(toPay)}
-                disabled={busy || toPay <= 0 || toPay > remaining}
-                title={toPay > remaining ? "Exceeds remaining" : ""}
+                disabled={busy || !check || remaining == null || toPay <= 0 || toPay > remaining}
+                title={remaining != null && toPay > remaining ? "Exceeds remaining" : ""}
               >
                 {busy ? "Processing..." : "Reserve & pay"}
               </Button>

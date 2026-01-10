@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { apiPost } from "@/lib/api";
 import { Button, Card, Pill } from "@/components/ui";
+import { normalizeTableToken } from "@/lib/tableToken";
 
 function MockPayInner() {
   const router = useRouter();
@@ -11,7 +12,9 @@ function MockPayInner() {
 
   const paymentIntentId = sp.get("paymentIntentId");
   const holdId = sp.get("holdId");
-  const tableToken = sp.get("tableToken") ?? "table-1";
+
+  const rawTable = sp.get("tableToken") ?? "1";
+  const tableToken = normalizeTableToken(rawTable);
 
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
